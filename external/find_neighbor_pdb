@@ -1,0 +1,1006 @@
+#! /usr/bin/perl
+
+##########################################################
+## Author:           Sumanta Mukherjee
+## Contact Details:  mukherjee.sumanta.iisc@gmail.com
+## Description:      A command line utility (linux based)
+##                   to perform various operation on Protein
+##                   Databank (PDB) coordinate files, viz.
+##                   extracting sequence from coordinates
+##                   finding neighbors for a given residue
+##                   or ligand definition. Identify the list
+##                   of ligands present in the PDB file, Extracting
+##                   chains.
+##########################################################
+
+use strict;
+use Getopt::Std;
+
+use constant B_TRUE => ( 1 == 1 );
+use constant B_FALSE => ( 1 == 0 );
+use constant S_EMPTY => '';
+use constant DEF_STS => 1;
+use constant SUCCESS_STS => 0;
+use constant X_COORD => 'X';
+use constant Y_COORD => 'Y';
+use constant Z_COORD => 'Z';
+use constant UNK_LIG => '###';
+use constant UNK_CHAIN => '#';
+use constant UNK_ATOM_TYPE => 'X';
+use constant UNK_ATOM_NAME => 'UNK';
+use constant GRID_SIZE  => 4 ;
+use constant GRID_BUFFER => 1;
+use constant RESIDUE_ID   => 'res_id';
+use constant CHAIN_ID => 'chain_id';
+use constant ATOM_ID => 'atom_id';
+use constant ATOM_NAME => 'atom_name';
+use constant ALT_IND => 'alternate';
+use constant RESIDUE_NAME => 'res_name';
+use constant B_FACTOR => 'b_factor';
+use constant OCCUPANCY => 'occupancy';
+use constant ATOM_TYPE => 'atom_type';
+use constant IS_HET_ATM => 'is_hetatm';
+use constant REF_COUNTER => 'ref_count';
+use constant CUTOFF_DISTANCE => 8;
+use constant LOWER_CUTOFF_DISTANCE => 0;
+use constant STRUCTURE_FILE_TEMP => 'scwrl_structure_file';
+use constant WRAP_TEXT_LENGTH => 60;
+use constant MIN_CUT_OFF_CONTACT => 1;
+use constant DEF_OUTPUT_DIRECTORY => 'OutDir';
+use constant SPACE_DIMENSION => 3;
+use constant DEF_TEMP_FACTOR => 20.00;
+use constant DEF_OCCUPANCY_FACTOR => 1.00;
+use constant DEF_ATOM_TYPE => '';
+use constant MIN_VALUE => -99999;
+use constant MAX_VALUE => 99999;
+use constant INF   => 9999999;
+use constant MIN_X => 'minx';
+use constant MIN_Y => 'miny';
+use constant MIN_Z => 'minz';
+use constant MAX_X => 'maxx';
+use constant MAX_Y => 'maxy';
+use constant MAX_Z => 'maxz';
+
+
+
+my %aathreetoonemap = ('ALA' => 'A', 'CYS' => 'C', 'ASP' => 'D', 'GLU' =>'E', 'PHE' => 'F',
+                       'GLY' => 'G', 'HIS' => 'H', 'ILE' => 'I', 'LYS' =>'K', 'LEU' => 'L',
+                       'MET' => 'M', 'ASN' => 'N', 'PRO' => 'P', 'GLN' =>'Q', 'ARG' => 'R',
+                       'SER' => 'S', 'THR' => 'T', 'VAL' => 'V', 'TRP' =>'W', 'TYR' => 'Y');
+
+my %aaonetothreemap = ('A' => 'ALA', 'C' => 'CYS', 'D' => 'ASP', 'E' => 'GLU', 'F' => 'PHE',
+                       'G' => 'GLY', 'H' => 'HIS', 'I' => 'ILE', 'K' => 'LYS', 'L' => 'LEU',
+                       'M' => 'MET', 'N' => 'ASN', 'P' => 'PRO', 'Q' => 'GLN', 'R' => 'ARG',
+                       'S' => 'SER', 'T' => 'THR', 'V' => 'VAL', 'W' => 'TRP', 'Y' => 'TYR');
+
+my $processID = $$;
+my $cutoff_distance = CUTOFF_DISTANCE;
+my $lower_cutoff_distance = LOWER_CUTOFF_DISTANCE;
+my $def_wrap_text_length = WRAP_TEXT_LENGTH;
+
+sub logerror($)
+{
+  chomp (my ($msg) = @_);
+  print STDERR "$msg\n";
+}
+
+sub uniq
+{
+  my @localcpy = @_;
+  my %uniqhash = ();
+  foreach (@localcpy){ $uniqhash{$_} = B_TRUE if(not defined $uniqhash{$_}); }
+  return sort {$a cmp $b } keys %uniqhash;
+}
+
+sub distance($$)
+{
+  my ($crd_ptr1, $crd_ptr2) = @_;
+  if(scalar @{$crd_ptr1} != scalar @{$crd_ptr2} or scalar @{$crd_ptr1} != 3){
+    print STDERR "Error: in the input !! \n";
+    exit 1;    
+  }
+  my $d = 0;
+  for(my $i=0; $i < scalar @{$crd_ptr1}; ++$i){
+  $d += (($crd_ptr1->[$i] - $crd_ptr2->[$i])*($crd_ptr1->[$i] - $crd_ptr2->[$i]));
+  }
+  return sqrt($d);
+}
+
+sub is_real
+{
+    my @localcpy = @_;
+    foreach (@localcpy){
+        return B_FALSE if( ! defined $_ or $_ !~ /^[+-]?\d*\.?(?:\d+[eE][+-]?)?\d+$/ );
+    }
+    return B_TRUE;
+}
+
+sub usage
+{
+  my ($ret_sts) = @_;
+  $ret_sts = DEF_STS if(not defined $ret_sts);
+  print STDERR <<_EOM_
+  ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  Usage: $^X $0 -f <pdb filename> [-L <ligand name>] [-l -B -C -s -e] [-n <ligand name> -R <lower bound cutoff for neighbor> -P <search point coordinate> -r <radius around the ligand> -c <Protein chain> -S <Around Residue> -p -x -X -F -t -i <invert selection> -d <directory name> ]  [-h]
+  ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  f: PDB file name containing all coordinate
+  B: extract back bone of specified chain specified using -c option
+  e: extract entire protein chain mentioned using -c option
+  L: extract ligand chain only
+  l: list all the ligand name .. this is the format it recognize as the ligand name. this option should be used alone
+     highest preference, if this tag is on only this will be executed
+  C: list down all available protein chains it has
+     second highest preference in order of execution
+  s: list down the chain sequences in fasta format;
+     third highest preference in order of execution
+  n: name of the ligands around which the list will be generated
+     eg. : -n NAG:B:1,NAG:A:1 
+  P: search point coordinate, some specified point around which neighbors to be evaluated
+     eg. : -P "-10.013,1.44,31.170"
+  r: radius around which the neighbor hood will be searched 
+     eg. : -r 3.6
+  R: radius for the lower bound cutoff for neighbor finding, this work with -r option
+     Make sure -r value is lower that -R value other wise no intersection region will be picked up
+     eg. : -r 8.0 -R 3.0
+     this will pick up the residues between 3 to 8 A
+  c: protein chain ID filter in the neighbor hood finding
+     eg. : -c A,C
+  i: invert selection
+     eg. : -i ZMA,NAG:A:23
+  S: select the neighors around residues
+     eg. : -S ARG23:A,SER24:B,PRO56:A
+  t: residue trace only applicable for protein 
+  p: this tag suggests the programme to write seperate file for each ligand neighbor
+  d: this tag works in conjunction with p tag, where it specifies the directory where the new PDB files to be written
+  x: also check for other ligand atoms in vicinity
+  F: consider filename as header name only.
+  X: print the ligands in the output pdb .. -x and -X can not be used together
+  h: help 
+  
+  Details: 
+  --------
+  This tool allows user to inspect the hetero atom present in a PDB file.
+  Also allows to extract the protein sequences from the file.
+  Using appropriate tags this tool allows user to find the neighbors of
+  hetero atoms.
+_EOM_
+ ;
+  exit $ret_sts;
+}
+
+sub trim
+{
+  my @localcpy = @_;
+  my @trimvals = ();
+  foreach (@localcpy) { s/^\s+//g; s/\s+$//g; push @trimvals, $_ if(defined $_ and "$_" ne '');}
+  return (wantarray)?@trimvals:$trimvals[0];
+}
+
+sub gridindex($$$)
+{
+  my ($nx, $ny, $nz) = @_;
+  $nx = -1 if(not defined $nx);
+  $ny = -1 if(not defined $ny);
+  $nz = -1 if(not defined $nz);
+  return sprintf("%d:%d:%d",$nx,$ny,$nz);
+}
+
+sub indexCalculator($$)
+{
+  my ($crd_ptr, $grid_ptr) = @_;
+  my $nx =  int(($crd_ptr->[0] - ${$grid_ptr}{MIN_X})/(1. * GRID_SIZE));
+  my $ny =  int(($crd_ptr->[1] - ${$grid_ptr}{MIN_Y})/(1. * GRID_SIZE));
+  my $nz =  int(($crd_ptr->[2] - ${$grid_ptr}{MIN_Z})/(1. * GRID_SIZE));
+  my $index = gridindex($nx,$ny,$nz);
+  return $index;
+}
+
+sub neighborIndex($$$)
+{
+  my ($crd_ptr,$grid_ptr, $radius ) = @_;
+  $radius = abs($radius);
+  my @indices = trim split(/:/,indexCalculator($crd_ptr,$grid_ptr));
+  my $span = int($radius/(1. * GRID_SIZE) + 1);
+  my @allindices = ();
+  for (my $i=-1 * $span; $i< $span; $i++){
+    for( my $j=-1 * $span; $j< $span; $j++){
+      for( my $k=-1 * $span; $k< $span; $k++){
+        push @allindices , gridindex($indices[0] + $i, $indices[1] + $j, $indices[2] + $k);
+      }
+    }
+  }
+  return @allindices;
+}
+
+sub buildgrid($;$$)
+{
+  my ($protein_ptr, $min_crd_ptr , $max_crd_ptr) = @_;
+  my %gridbox = ();
+  my @protein = @{$protein_ptr};
+  if(not defined $min_crd_ptr or 
+     not defined $max_crd_ptr or 
+     scalar @{$min_crd_ptr} != scalar @{$max_crd_ptr} or 
+     scalar @{$min_crd_ptr} != SPACE_DIMENSION)
+  {
+    undef $max_crd_ptr; undef $min_crd_ptr; 
+  } 
+  if(not defined $min_crd_ptr or not defined $max_crd_ptr){
+    my ($minx, $miny, $minz, $maxx, $maxy, $maxz) = undef;
+    foreach my $protein_atom (@protein){
+      $minx = (defined $minx and $minx < ${$protein_atom}{X_COORD})?$minx:${$protein_atom}{X_COORD};
+      $miny = (defined $miny and $miny < ${$protein_atom}{Y_COORD})?$miny:${$protein_atom}{Y_COORD};
+      $minz = (defined $minz and $minz < ${$protein_atom}{Z_COORD})?$minz:${$protein_atom}{Z_COORD};
+      $maxx = (defined $maxx and $maxx > ${$protein_atom}{X_COORD})?$maxx:${$protein_atom}{X_COORD};
+      $maxy = (defined $maxy and $maxy > ${$protein_atom}{Y_COORD})?$maxy:${$protein_atom}{Y_COORD};
+      $maxz = (defined $maxz and $maxz > ${$protein_atom}{Z_COORD})?$maxz:${$protein_atom}{Z_COORD};
+    }
+    if(defined $minx){
+      $max_crd_ptr = [ $maxx, $maxy, $maxz ];
+      $min_crd_ptr = [ $minx, $miny, $minz];
+    }
+  }
+  if( ! defined( $max_crd_ptr ) or ! defined( $min_crd_ptr ) ){
+    logerror("Error: Fatal error... Can not determine the extreme coordinates of the protein box. Fatal Error.. !!");
+    exit DEF_STS;
+  }
+  foreach (0..((scalar @{$max_crd_ptr})-1)){
+    $max_crd_ptr->[$_] += GRID_BUFFER;
+    $min_crd_ptr->[$_] -= GRID_BUFFER;
+  }  
+  my @ngrid_size = ();
+  $gridbox{MAX_X} = $max_crd_ptr->[0];    $gridbox{MIN_X} = $min_crd_ptr->[0];
+  $gridbox{MAX_Y} = $max_crd_ptr->[1];    $gridbox{MIN_Y} = $min_crd_ptr->[1];
+  $gridbox{MAX_Z} = $max_crd_ptr->[2];    $gridbox{MIN_Z} = $min_crd_ptr->[2];
+
+  foreach my $protein_atom (@protein){
+     my $idx = indexCalculator([${$protein_atom}{X_COORD}, ${$protein_atom}{Y_COORD}, ${$protein_atom}{Z_COORD}], \%gridbox);
+     my %local_hash = %{$protein_atom};
+     if(defined $gridbox{$idx}){ 
+       push  @{$gridbox{$idx}} , \%local_hash;
+     }else{
+        $gridbox{$idx} = [ \%local_hash ];
+     }
+  } 
+  return %gridbox;
+}
+
+
+sub aa3to1map($)
+{
+  my ($str) = trim @_;
+  if(defined $aathreetoonemap{uc $str}) {return $aathreetoonemap{uc $str};}
+  else                                  {return 'X';}
+}
+
+sub isvalidproteinsequence($)
+{
+  my ($seq) = @_;
+  return ($seq =~ /^[ACDEFGHIKLMNPQRSTVWY]+$/i);
+}
+
+sub extractheader($;$)
+{
+  my ($pdbfile,$usefile_name ) = @_;
+  my $extract_header = undef;
+  $extract_header = lc $1 if( $pdbfile =~ /([^\/]+)(?:\.(pdb|ent|xyz|txt))*$/); 
+  return $extract_header if( defined $usefile_name and $usefile_name == B_TRUE );
+  open FH, "$pdbfile" or die "Error: opening pdb file : $pdbfile : $! \n";
+  while(chomp (my $line = <FH> ) )
+  {
+    if($line =~ /^HEADER\s+.*\s+([\w\d]+)\s*$/){ $extract_header = lc $1,last;}
+  }
+  close FH;
+  return $extract_header;
+}
+
+
+sub wraptext($)
+{
+  my ($sequence) = @_;
+  $sequence =~ s/([ACDEFGHIKLMNPQRSTVWY]{$def_wrap_text_length})/$1\n/g;
+  return $sequence;
+}
+
+sub extractsequence($;$$)
+{
+  my ($filename, $is_model, $model_id) = @_;
+  if( not open (WH, "$filename") ){
+    logerror("error opening file $filename : $! ");
+    exit(1);
+  }
+  my $chainid = '###';
+  my $default_chainid = 'A';
+  my $sequence = undef;
+  my %sequence_map = ();
+  my $resid = '###';
+  my $do_process = (defined $model_id)?B_FALSE:B_TRUE;
+  while(chomp (my $line = <WH>))
+  {
+    $do_process = B_TRUE if($line =~ /^MODEL \s*$model_id/);
+    next if($do_process == B_FALSE);
+    if($line =~ /^(TER|END)/){
+      if(defined $sequence and length $sequence > 0){
+         if( not isvalidproteinsequence($sequence)){
+            logerror("Invalid Sequence \'".wraptext($sequence)."\' \n");
+         }
+         $chainid = $default_chainid if(not defined $chainid or defined  $sequence_map{$chainid});
+         while(defined $sequence_map{$chainid}) { $chainid++; }
+         $sequence_map{$chainid} = $sequence;
+         $default_chainid = $chainid;
+         undef $sequence; undef $chainid;
+      }
+    }
+    last if($line =~ /^END/ and defined $model_id);
+    next if($line !~ /^ATOM  /);
+    my $t1 = substr($line,21,1);
+    my $t2 = substr($line,22,4);
+
+    if("$t1" ne "$chainid" and defined $sequence ){
+       if( not isvalidproteinsequence($sequence)){
+           logerror("Invalid Sequemce \'".wraptext($sequence)."\' \n");
+       }
+
+      $chainid = $default_chainid if(not defined $chainid or defined $sequence_map{$chainid});
+      while(defined $sequence_map{$chainid}) {$chainid++;}
+      $sequence_map{$chainid} = $sequence;
+      $default_chainid = $chainid;
+      undef $sequence; undef $chainid;
+    }
+    $chainid = $t1;
+    if($t2 != $resid){
+      my $residue = substr($line,17,3);
+      if(not defined $sequence){$sequence = aa3to1map($residue);}
+      else{$sequence .= aa3to1map($residue);}
+      $resid = $t2;
+    }
+  }
+  close WH;
+  if(defined $sequence and length $sequence > 0){
+      if( not isvalidproteinsequence($sequence)){
+           logerror("Invalid Sequemce \'".wraptext($sequence)."\' \n");
+       }
+      $chainid = $default_chainid if(not defined $chainid or defined $sequence_map{$chainid});
+      while(defined $sequence_map{$chainid})
+      {
+        $chainid++;
+      }
+      $sequence_map{$chainid} = $sequence;
+      $default_chainid = $chainid;
+      undef $sequence; undef $chainid;
+  }
+  return %sequence_map;
+}
+
+sub extractAtomline($)
+{
+  chomp (my ($line) =  @_);
+  my %atomdetails = ();
+  if($line !~ /^ATOM  / or length $line < 54 ){ return %atomdetails; }
+  my $tmp = undef;
+
+  $tmp = trim substr($line,6,5); $atomdetails{ATOM_ID} = $tmp if(defined $tmp);
+  $tmp = trim substr($line,12,4); $atomdetails{ATOM_NAME} = $tmp if(defined $tmp);
+  $tmp = trim substr($line,16,1); $atomdetails{ALT_IND} = (defined $tmp)?$tmp:' ';
+  $tmp = trim substr($line,17,3); $atomdetails{RESIDUE_NAME} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 21,1); $atomdetails{CHAIN_ID} = $tmp if(defined $tmp);
+  $tmp = trim substr($line,22,4); $atomdetails{RESIDUE_ID} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 30, 8); $atomdetails{X_COORD} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 38, 8); $atomdetails{Y_COORD} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 46, 8); $atomdetails{Z_COORD} = $tmp if(defined $tmp);
+  $tmp = (length $line >=60 )?trim substr($line, 54, 6):DEF_OCCUPANCY_FACTOR; $atomdetails{OCCUPANCY} = (defined $tmp and $tmp ne S_EMPTY)?$tmp:DEF_OCCUPANCY_FACTOR;
+  $tmp = (length $line >=66 )?trim substr($line,60,6):DEF_TEMP_FACTOR ; $atomdetails{B_FACTOR} = (defined $tmp and $tmp ne S_EMPTY)?$tmp:DEF_TEMP_FACTOR;
+  $tmp = (length $line >= 78)?trim substr($line,76,2):DEF_ATOM_TYPE ; $atomdetails{ATOM_TYPE} = $tmp if(defined $tmp);
+
+  return %atomdetails;
+}
+
+sub extractHETAtomline($)
+{
+  chomp (my ($line) =  @_);
+  my %atomdetails = ();
+  if($line !~ /^HETATM/ or length $line < 54 ){ return %atomdetails; }
+  my $tmp = undef;
+
+  $tmp = trim substr($line,6,5); $atomdetails{ATOM_ID} = $tmp if(defined $tmp);
+  $tmp = trim substr($line,12,4); $atomdetails{ATOM_NAME} = $tmp if(defined $tmp);
+  $tmp = trim substr($line,16,1); $atomdetails{ALT_IND} = (defined $tmp)?$tmp:' ';
+  $tmp = trim substr($line,17,3); $atomdetails{RESIDUE_NAME} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 21,1); $atomdetails{CHAIN_ID} = $tmp if(defined $tmp);
+  $tmp = trim substr($line,22,4); $atomdetails{RESIDUE_ID} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 30, 8); $atomdetails{X_COORD} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 38, 8); $atomdetails{Y_COORD} = $tmp if(defined $tmp);
+  $tmp = trim substr($line, 46, 8); $atomdetails{Z_COORD} = $tmp if(defined $tmp);
+  $tmp = (length $line >=60 )?trim substr($line, 54, 6):DEF_OCCUPANCY_FACTOR; $atomdetails{OCCUPANCY} = (defined $tmp and $tmp ne S_EMPTY)?$tmp:DEF_OCCUPANCY_FACTOR;
+  $tmp = (length $line >=66 )?trim substr($line,60,6):DEF_TEMP_FACTOR ; $atomdetails{B_FACTOR} = (defined $tmp and $tmp ne S_EMPTY)?$tmp:DEF_TEMP_FACTOR;
+  $tmp = (length $line >= 78)?trim substr($line,76,2):DEF_ATOM_TYPE ; $atomdetails{ATOM_TYPE} = $tmp if(defined $tmp);
+
+  return %atomdetails;
+}
+
+
+
+sub writeAtomline($;$)
+{
+  my %atomline = %{$_[0]};
+  my $fileptr = (scalar @_ == 2)?$_[1]:\*STDOUT;
+  if(length $atomline{ATOM_NAME} == 4){
+      printf $fileptr "ATOM  %5d %-4s%1s%3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %2s  \n",$atomline{ATOM_ID},$atomline{ATOM_NAME},$atomline{ALT_IND},$atomline{RESIDUE_NAME},$atomline{CHAIN_ID},$atomline{RESIDUE_ID},$atomline{X_COORD},$atomline{Y_COORD},$atomline{Z_COORD},$atomline{OCCUPANCY},$atomline{B_FACTOR},$atomline{ATOM_TYPE};
+  }else{
+      printf $fileptr "ATOM  %5d  %-3s%1s%3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %2s  \n",$atomline{ATOM_ID},$atomline{ATOM_NAME},$atomline{ALT_IND},$atomline{RESIDUE_NAME},$atomline{CHAIN_ID},$atomline{RESIDUE_ID},$atomline{X_COORD},$atomline{Y_COORD},$atomline{Z_COORD},$atomline{OCCUPANCY},$atomline{B_FACTOR},$atomline{ATOM_TYPE};
+  }
+  return;
+}
+
+sub writeHETAtomline($;$)
+{
+  my %atomline = %{$_[0]};
+  my $fileptr = (scalar @_ == 2)?$_[1]:\*STDOUT;
+  if(length $atomline{ATOM_NAME} == 4){
+      printf $fileptr "HETATM%5d %-4s%1s%3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %2s  \n",$atomline{ATOM_ID},$atomline{ATOM_NAME},$atomline{ALT_IND},$atomline{RESIDUE_NAME},$atomline{CHAIN_ID},$atomline{RESIDUE_ID},$atomline{X_COORD},$atomline{Y_COORD},$atomline{Z_COORD},$atomline{OCCUPANCY},$atomline{B_FACTOR},$atomline{ATOM_TYPE};
+  }else{
+      printf $fileptr "HETATM%5d  %-3s%1s%3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %2s  \n",$atomline{ATOM_ID},$atomline{ATOM_NAME},$atomline{ALT_IND},$atomline{RESIDUE_NAME},$atomline{CHAIN_ID},$atomline{RESIDUE_ID},$atomline{X_COORD},$atomline{Y_COORD},$atomline{Z_COORD},$atomline{OCCUPANCY},$atomline{B_FACTOR},$atomline{ATOM_TYPE};
+  }
+  return;
+}
+
+
+sub extractCoord($$;$)
+{
+  my ($filename, $chainid, $model_number ) = @_;
+  if( not open(FH, "$filename") ){
+    print STDERR "Error: opening file $filename  :$! \n";
+    exit 1;
+  }
+  my $line = undef;
+  my @protein = ();
+  my $line_counter = 0;
+  my $do_process = (defined $model_number)?B_FALSE:B_TRUE;
+  while(chomp($line = <FH>)){
+    $do_process = B_TRUE if( $do_process == B_FALSE and $line =~ /^MODEL \s*$model_number/);
+    next if($do_process == B_FALSE);
+    $line_counter++;
+    if($line =~ /^ATOM  /){
+      my %atomline = extractAtomline($line);
+      if(defined $atomline{CHAIN_ID} and $atomline{CHAIN_ID} eq $chainid )
+      {
+        $atomline{REF_COUNTER} = $line_counter;
+        $atomline{IS_HET_ATM} = B_FALSE;
+        push @protein, \%atomline;
+      }
+    }elsif($line =~ /^(END|TER)/ and scalar @protein > 1){
+      last;
+    }
+  }
+  close FH;
+  return @protein;
+}
+
+sub extractHetCoords($;$)
+{
+  my ($filename,$model_number) = @_;
+  if( not open(FH, "$filename") ){
+    print STDERR "Error: opening file $filename  :$! \n";
+    exit 1;
+  }
+  my $line = undef;
+  my ($hetatmname, $hetatmchain, $hetatmid,$pustring) = undef;
+  my %hetatms = ();
+  my @hetatmlines = ();
+  my $line_counter = 0;
+  my $do_process = (defined $model_number)?B_FALSE:B_TRUE;
+  while(chomp($line = <FH>)){
+    $do_process = B_TRUE if($do_process == B_FALSE and $line =~ /^MODEL \s*$model_number/);
+    next if( $do_process == B_FALSE );
+    my $ignore = B_FALSE;
+    $line_counter++;
+    if( $line =~ /^HETATM/){
+      my %atomline = extractHETAtomline($line);
+      $hetatmname = $atomline{RESIDUE_NAME};
+      $hetatmchain = $atomline{CHAIN_ID};
+      $hetatmid = $atomline{RESIDUE_ID};
+      my $ustring = "$hetatmname:$hetatmchain:$hetatmid";
+      if(defined $pustring and $pustring ne $ustring and not defined $hetatms{$ustring} and scalar @hetatmlines > 0 ){
+        my @localcpy = @hetatmlines;
+        $hetatms{$pustring} = \@localcpy;
+        @hetatmlines = ();
+      }elsif( defined $pustring and ($pustring ne $ustring) and defined $hetatms{$ustring}){
+        print STDERR "Error: Unexpected Occurance hetatm string \"$ustring\" ..\n";
+        $ignore = B_TRUE;
+        #next;
+      }
+      if( not $ignore ) {
+       $atomline{REF_COUNTER} = $line_counter;
+       $atomline{IS_HET_ATM} = B_TRUE;
+       push  @hetatmlines , \%atomline;
+      }
+      $pustring = $ustring;
+    }
+    last if( $line =~ /^END/ and defined $model_number);
+  }
+  close FH;
+  if(scalar @hetatmlines > 0 and defined $pustring){
+    my @localcpy = @hetatmlines;
+    $hetatms{$pustring} = \@localcpy;
+    @hetatmlines = ();
+  }
+  return %hetatms;
+}
+
+sub residueIndex($$)
+{
+  my ($residue_name, $residue_id) = @_;
+  return sprintf("%s:%d", $residue_name, $residue_id);
+}
+
+sub buildProteinByResidue
+{
+  my @protein = @_;
+  my %proteinSequenceMap = ();
+  foreach my $protein_atom (@protein){
+    my $index = residueIndex(${$protein_atom}{RESIDUE_NAME}, ${$protein_atom}{RESIDUE_ID});
+    if(exists $proteinSequenceMap{$index}){
+      push @{$proteinSequenceMap{$index}}, $protein_atom;
+    }else{
+      $proteinSequenceMap{$index} = [$protein_atom ];
+    }
+  }
+  return %proteinSequenceMap;
+}
+
+sub hasMultipleModel($)
+{
+  my ($pdbfile) = @_;
+  open FH, "$pdbfile" or die "Error: Can not open PDB file : $pdbfile : $! \n";
+  my $is_model = B_FALSE;
+  while( chomp( my $line = <FH> ) ){
+   if( $line =~ /^MODEL /){
+      $is_model = B_TRUE;
+      last;
+   } 
+  }
+  close FH;
+  return $is_model;
+}
+
+sub extractModelNumber($)
+{
+  my ($pdbfile) = @_; 
+  open FH, "$pdbfile" or die "Error: Can not open PDB file : $pdbfile : $! \n";
+  my @model_ids = ();
+  my $tagon = B_FALSE;
+  while( chomp( my $line = <FH> ) ){
+    if( $line =~ /^MODEL \s*(\d+)/){
+      push @model_ids, $1; 
+      die "Error: improper MODEL tag expects END cards between Model. \n" if($tagon == B_TRUE);
+      $tagon = B_TRUE;
+    }
+    if( $line =~ /^END/ ){
+      $tagon = B_FALSE;
+    }
+  }
+  close FH;
+  return @model_ids;
+}
+
+sub is_hash_ref($)
+{
+  my ($ref) = @_;
+  eval{ my %hash = %{$ref}; };
+  return (! $@);
+}
+
+sub among_marked_residues($$)
+{
+  my ( $atom_ptr, $marked_ref ) = @_;
+  die "Error: Inconsisten state .. Programme bug!\n" if( ! is_hash_ref( $atom_ptr)  || 
+                                                         ! is_hash_ref($marked_ref) || 
+                                                         ! defined $atom_ptr->{RESIDUE_ID} || 
+                                                         ! defined $atom_ptr->{CHAIN_ID} ||
+                                                         ! defined $atom_ptr->{RESIDUE_NAME} );
+  return ( defined $marked_ref->{$atom_ptr->{CHAIN_ID}}  && 
+           defined $marked_ref->{$atom_ptr->{CHAIN_ID}}->{$atom_ptr->{RESIDUE_ID}} && 
+           $marked_ref->{$atom_ptr->{CHAIN_ID}}->{$atom_ptr->{RESIDUE_ID}} eq $atom_ptr->{RESIDUE_NAME});
+}
+
+###############################################################
+# Function Main
+###############################################################
+my ($pdbfile, $chainids, $chain_extract, $ligandnames, $invertligandtype, $showligand, $showchain, $showfasta, $includeligandneighbor, $trace_residue, $put_ligand_atoms, $dump_seperate_pdb,$extract_bb, $filename_only, $extract_lig, $abt_pt, $h_x, $h_y, $h_z, $around_residue) = (undef , undef , B_FALSE , undef , undef , B_FALSE , B_FALSE , B_FALSE , B_FALSE, B_FALSE , B_FALSE, B_FALSE,B_FALSE, B_FALSE , undef, B_FALSE, undef, undef, undef , B_FALSE );
+my %residue_select = ();
+my %opts = ();
+my %ligands = ();
+my %sequence_map = ();
+my %proteins = ();
+my $is_nmr_model = B_FALSE;
+my %model_details = ();
+my @model_number = ();
+my %selected_chainIds = ();
+my $default_directory = undef;
+getopts('f:n:r:R:c:i:d:BP:L:S:exXltpCFsh',\%opts);
+
+usage 0 if(defined $opts{'h'});
+
+$pdbfile = $opts{f} if(defined $opts{f});
+$showligand = B_TRUE if(defined $opts{l});
+$showchain  = B_TRUE if(defined $opts{C});
+$showfasta  = B_TRUE if(defined $opts{s});
+$chain_extract = B_TRUE if( defined $opts{e});
+$trace_residue = B_TRUE if(defined $opts{t});
+$dump_seperate_pdb = B_TRUE if(defined $opts{p});
+$includeligandneighbor = B_TRUE if(defined $opts{'x'});
+$filename_only =  B_TRUE if(defined $opts{F});
+$default_directory = $opts{d} if(defined $opts{d} and $dump_seperate_pdb == B_TRUE and (-d $opts{'d'} or mkdir $opts{'d'}));
+$put_ligand_atoms = B_TRUE if(defined $opts{'X'} and $includeligandneighbor == B_FALSE);
+$cutoff_distance = $opts{'r'} if(defined $opts{'r'} and $opts{'r'} =~ /^[\d]+[.]?[\d]*$/);
+$lower_cutoff_distance = $opts{'R'} if(defined $opts{'R'} and $opts{'R'} =~ /^[\d]+[.]?[\d]*$/);
+$chainids = $opts{'c'} if(defined $opts{'c'} and $opts{'c'} =~ /^(?:\w,)*[\w]?$/ );
+$ligandnames = $opts{'n'} if(defined $opts{'n'} and $opts{'n'} =~ /^(?:([\w\d]{1,3}:[\w]?:[\d]+|[\w\d]{1,3})|###,)*(?:([\w\d]{1,3}:[\w]?:[\d]+|[\w\d]{1,3}|###))?$/);
+$invertligandtype = $opts{'i'} if(defined $opts{'i'} and $opts{'i'} =~ /^(?:([\w\d]{1,3}:[\w]?:[\d]+|[\w\d]{1,3}),)*(?:([\w\d]{1,3}:[\w]?:[\d]+|[\w\d]{1,3}))?$/);
+$extract_bb = B_TRUE if(defined $opts{B} );
+$extract_lig = $opts{'L'} if( defined $opts{'L'}  and $opts{'L'} =~ /^[0-9A-Z]{2,3}/i);
+if( defined  $opts{'P'} and $opts{'P'} =~ /^(?:[+-]?[\d]*\.?[\d]+,){2}[+-]?[\d]*[.]?[\d]+/){
+    $abt_pt = B_TRUE;
+    ($h_x, $h_y, $h_z) = trim split( /,/, $opts{'P'});
+}
+
+if( defined $opts{'S'} and $opts{'S'} =~ /^(?:(?:[A-Z]{3}\d+:\w)?,)*(?:[A-Z]{3}\d+:\w)?$/){
+    my @all_residues = trim split(/[\s,]+/, $opts{'S'});
+    foreach my $res ( @all_residues ){
+        my $valid = B_FALSE;    
+        if( $res =~ /^([A-Z]{3})(\d+):(\w)$/){
+            my $name = $1;
+            my $residue_id = $2;
+            my $chain_id = $3;
+            $residue_select{$chain_id} = {} if( ! defined $residue_select{$chain_id} );
+            if( defined $aathreetoonemap{$name} ){
+                $valid = B_TRUE;
+                $residue_select{$chain_id}{$residue_id} = $name ;
+            } 
+        }
+        die "Error: Invalid usage of the key $opts{S} option improper. Use -h tag for further support !\n" if(! $valid);
+    }
+    $around_residue = ( scalar @all_residues > 0 );
+}
+
+
+usage if(not defined $pdbfile);
+open FH, "$pdbfile" or die "Error: opening PDB file : $pdbfile : $! \n";
+close FH;
+$is_nmr_model = hasMultipleModel( $pdbfile );
+@model_number = extractModelNumber( $pdbfile ) if($is_nmr_model == B_TRUE); 
+my $model_count = 0;
+
+logerror("Warning: Model file detected.. This will be treated as special file \n") if($is_nmr_model == B_TRUE);
+
+LOOP_START_FOR_MODEL:
+
+%ligands = extractHetCoords( $pdbfile, $model_number[$model_count] );
+%sequence_map = extractsequence( $pdbfile,$is_nmr_model, $model_number[$model_count]);
+my %grid_hash = ();
+my %protein_sequence_hash_map = ();
+ 
+if( defined $extract_lig ){
+    my @ligshows = ();
+    foreach ( keys %ligands ){
+        push @ligshows, $_ if( $_ =~ /^${extract_lig}/ );
+    }
+    foreach (@ligshows){
+      foreach my $ptr (@{$ligands{$_}}){
+        writeHETAtomline($ptr);
+      }
+      print "TER\n";
+    }
+    exit SUCCESS_STS;
+}
+
+if($showligand == B_TRUE){
+ foreach (keys %ligands){ 
+    print "$_\n" if($_ !~ /^HOH/);
+ }
+ exit SUCCESS_STS;    
+}
+
+
+if($showchain == B_TRUE){
+  foreach (keys %sequence_map){
+    print "$_:",length($sequence_map{$_}),"\n";
+  }
+  exit SUCCESS_STS;
+}
+
+if($showfasta == B_TRUE ){
+  my @allchains = keys %sequence_map;
+  if(defined $chainids){
+    my @localarr = ();
+    foreach ( trim split(/,/, $chainids) ){
+        push @localarr , $_ if(defined $sequence_map{$_});
+    }
+    @allchains = @localarr;
+  }
+  my $header = extractheader($pdbfile,$filename_only);
+  foreach (@allchains){
+    print ">${header}:$_\n";
+    print wraptext($sequence_map{$_}),"\n"; 
+  }
+  exit SUCCESS_STS;
+}
+
+if($chain_extract == B_TRUE  or $extract_bb == B_TRUE ){
+ my @allchains = keys %sequence_map;
+ if(defined $chainids){
+   my @localarr = ();
+   foreach ( trim split(/,/, $chainids) ){
+     push @localarr , $_ if(defined $_ and defined $sequence_map{$_});
+   }
+   @allchains = @localarr;
+ }
+ foreach my $tcid (@allchains){
+  my @protein_lines = extractCoord($pdbfile, $tcid);
+  foreach (@protein_lines){
+    if($extract_bb == B_TRUE ){
+     writeAtomline($_) if( $_->{ATOM_NAME} eq 'CA' || $_->{ATOM_NAME} eq 'C' || $_->{ATOM_NAME} eq 'O' || $_->{ATOM_NAME} eq 'N' );
+    }else{
+     writeAtomline($_);
+    }
+  }
+  print STDOUT "TER   \n";
+ }
+ print STDOUT "END   \n";
+ exit SUCCESS_STS;
+}
+
+
+my @reqdligands = grep !/^HOH/ , keys %ligands;
+my @proteinchains = keys %sequence_map;
+
+
+if(defined $ligandnames){
+  my @locallig = ();
+  foreach my $lg (trim split(/,/,$ligandnames)){
+    foreach my $ligname (keys %ligands){
+      push @locallig , $ligname if( $ligname =~ /^$lg/);
+    }
+  }
+  if(scalar @locallig > 0 or $abt_pt ){
+    @reqdligands = uniq @locallig;
+  }else{
+    logerror("Warning : provided ligands does not match any ligands.. Defaulting to all ligands \n");
+  }
+}
+  
+if(defined $invertligandtype){
+  my @excludeligands = (trim split(/,/,$invertligandtype));
+  my @locallig = ();
+L0: foreach my $l (@reqdligands){
+      my $do_include = B_TRUE;
+L1:   foreach my $e (@excludeligands){
+          if($l =~ /^$e/){ $do_include = B_FALSE; last L1;}
+      }
+      push @locallig, $l if($do_include == B_TRUE);
+  }
+  @reqdligands = @locallig;
+}
+
+if( defined $abt_pt and is_real( $h_x, $h_y, $h_z )){
+   my $ptatm  = {
+         ATOM_ID => 1,
+         ATOM_NAME => UNK_ATOM_NAME,
+         RESIDUE_NAME => UNK_LIG,
+         CHAIN_ID => UNK_CHAIN,
+         RESIDUE_ID => 1,
+         X_COORD  => $h_x,
+         Y_COORD  => $h_y, 
+         Z_COORD => $h_z,
+         OCCUPANCY => DEF_OCCUPANCY_FACTOR,
+         B_FACTOR  => DEF_TEMP_FACTOR,
+         ATOM_TYPE => UNK_ATOM_TYPE,
+         IS_HET_ATM => B_TRUE,
+         REF_COUNTER => INF
+   };
+   my $unk_lig = UNK_LIG;
+   print STDERR "Warning: Point Set and Ligand Can not be mapped together ignoring all ligands !\n" if( @reqdligands && scalar @reqdligands > 0 );
+   @reqdligands = ($unk_lig);
+   $ligands{ $unk_lig } = [ $ptatm ];  
+}
+
+%selected_chainIds = map { $_ => B_TRUE } @proteinchains;
+
+if(defined $chainids){
+  %selected_chainIds = ();
+  my @localchain = ();
+  foreach (trim split(/,/,$chainids)){
+    if(exists $sequence_map{$_}){ push @localchain, $_;}
+  }
+  if(scalar @localchain > 0){
+    %selected_chainIds = map { $_ => B_TRUE } @localchain;
+  }else{
+    logerror("Warning: provided chain IDs does not exists so defaulting to all chains ..\n");
+  }
+}
+my %proteinmap = ();
+foreach (@proteinchains){
+  $proteinmap{$_} = [ extractCoord($pdbfile,$_,$model_number[$model_count]) ];
+  $grid_hash{$_} = {buildgrid( $proteinmap{$_})} ;
+  $protein_sequence_hash_map{$_} = {buildProteinByResidue(@{$proteinmap{$_}})};
+}
+
+if( $around_residue )
+{
+     print STDERR "Warning: Residue neighbors and Ligand Can not be mapped together. All ligands are ignored !\n" if( @reqdligands && scalar @reqdligands > 0 );
+     @reqdligands = ();
+Q1:  foreach my $chainid ( keys %residue_select ){ 
+        next Q1 if( ! defined $proteinmap{$chainid} );
+Q2:     foreach my $res ( keys %{$residue_select{$chainid}}){
+            my @flds = ();
+            my @coords = @{$proteinmap{$chainid}};
+            my $start = B_FALSE;
+Q3:         foreach my $atom ( @coords ){
+                if( $atom->{RESIDUE_ID} == $res && $atom->{RESIDUE_NAME} eq "$residue_select{$chainid}{$res}" ){
+                    my $ptatm  = { ATOM_ID => 1,
+                                   ATOM_NAME => $atom->{ATOM_NAME},
+                                   RESIDUE_NAME => $atom->{RESIDUE_NAME},
+                                   CHAIN_ID => $atom->{CHAIN_ID},
+                                   RESIDUE_ID => $atom->{RESIDUE_ID},
+                                   X_COORD  => $atom->{X_COORD},
+                                   Y_COORD  => $atom->{Y_COORD},
+                                   Z_COORD  => $atom->{Z_COORD},
+                                   OCCUPANCY => $atom->{OCCUPANCY},
+                                   B_FACTOR  => $atom->{B_FACTOR},
+                                   ATOM_TYPE => $atom->{ATOM_TYPE},
+                                   IS_HET_ATM => B_FALSE,
+                                   REF_COUNTER => INF  };    
+                    push @flds, $ptatm; 
+                    $start = B_TRUE;
+                }elsif( $start ){
+                    $start = B_FALSE;
+                    last Q3;
+                }
+           }
+           if( @flds && scalar @flds > 0 ){
+             my $ligname = "$residue_select{$res}${res}${chainid}";
+             push @reqdligands, $ligname;
+             $ligands{$ligname} = [ @flds ];
+           }
+        }
+    }
+}
+
+if(scalar @reqdligands == 0){
+  logerror("Error: No ligand to process ... \n");
+  exit SUCCESS_STS;
+}
+
+
+my @neighbors = ();
+my %neighbor_map = ();
+my %visited_refcount = ();
+
+P0: foreach my $ligand (@reqdligands){
+     my @all_ligand_atm = @{$ligands{$ligand}};
+     my @ligand_neighbors = ();
+P1:  foreach my $proteinid (@proteinchains){
+       my %residue_atoms = ();
+       foreach my $lig_atm (@all_ligand_atm){
+          my @crd1 = (${$lig_atm}{X_COORD}, ${$lig_atm}{Y_COORD}, ${$lig_atm}{Z_COORD});
+          my $resid = undef;
+          my $hit_residue = 0;
+          my @neighborcells = neighborIndex(\@crd1, $grid_hash{$proteinid}, $cutoff_distance);
+          foreach my $index (@neighborcells){ 
+              next if(not defined ${$grid_hash{$proteinid}}{$index});
+P2:           foreach my $pro_atm (@{${$grid_hash{$proteinid}}{$index}}){
+                  next P2 if( defined $visited_refcount{ ${$pro_atm}{REF_COUNTER} } and $dump_seperate_pdb == B_FALSE);
+                  $resid = residueIndex(${$pro_atm}{RESIDUE_NAME} , ${$pro_atm}{RESIDUE_ID});
+                  my @crd2 = ( ${$pro_atm}{X_COORD}, ${$pro_atm}{Y_COORD}, ${$pro_atm}{Z_COORD} );
+		  my $dist = distance(\@crd1, \@crd2);
+                  if( $dist <= $cutoff_distance  and $dist > $lower_cutoff_distance ){
+                    $hit_residue++;
+                    $residue_atoms{$resid} = $hit_residue;
+                    if($trace_residue == B_FALSE){
+                       $visited_refcount{ ${$pro_atm}{REF_COUNTER} } = B_TRUE;
+                       push @neighbors, $pro_atm;
+                       push @ligand_neighbors , $pro_atm;
+                    }
+                  } 
+              }
+          }
+       }
+       if($trace_residue == B_TRUE){
+P2_1:  foreach my $resid (keys %residue_atoms){
+           next P2_1 if($residue_atoms{$resid} < MIN_CUT_OFF_CONTACT);
+           if(not defined ${$protein_sequence_hash_map{$proteinid}}{$resid}){
+               logerror("Error: This is logical Error: can not find Residue : $resid in Protein Chain $proteinid \n");
+               next P2_1;
+           }
+           my @residues_cont = ();
+           foreach my $pro_atm (@{${$protein_sequence_hash_map{$proteinid}}{$resid}}){
+               push @residues_cont , $pro_atm;
+           }
+           foreach my $resatm (@residues_cont){
+            $visited_refcount{ ${$resatm}{REF_COUNTER} } = B_TRUE;
+            push @neighbors, $resatm;
+            push @ligand_neighbors , $resatm;
+           }
+         }
+       }
+     }     
+  if($includeligandneighbor == B_TRUE){
+P3:  foreach my $ligand_id (keys %ligands){
+      next P3 if($ligand_id eq $ligand );
+      my @all_ngh_lig_atm = @{$ligands{$ligand_id}};
+P4:   foreach my $lig_atm (@all_ligand_atm){
+          my @crd1 = (${$lig_atm}{X_COORD}, ${$lig_atm}{Y_COORD}, ${$lig_atm}{Z_COORD});
+P5:       foreach my $ngh_lig_atm (@all_ngh_lig_atm){
+            next P5 if( defined $visited_refcount{ ${$ngh_lig_atm}{REF_COUNTER} } and $dump_seperate_pdb == B_FALSE );
+            my @crd2 = (${$ngh_lig_atm}{X_COORD}, ${$ngh_lig_atm}{Y_COORD}, ${$ngh_lig_atm}{Z_COORD});
+	    my $dist = distance( \@crd1, \@crd2 );
+            if( $dist <= $cutoff_distance and $dist > $lower_cutoff_distance){  
+              $visited_refcount{ ${$ngh_lig_atm}{REF_COUNTER} } = B_TRUE;
+              push @neighbors, $ngh_lig_atm;
+              push @ligand_neighbors, $ngh_lig_atm;
+            }
+          }
+      }
+    }
+  }
+  $neighbor_map{$ligand} = \@ligand_neighbors; 
+}
+
+
+if(not defined $dump_seperate_pdb or $dump_seperate_pdb == B_FALSE)
+{
+  printf ("%-6s %8d\n","MODEL",$model_number[$model_count]) if($is_nmr_model == B_TRUE);
+    foreach my $ptr (sort { ${$a}{REF_COUNTER} <=> ${$b}{REF_COUNTER}  } @neighbors){
+        if(${$ptr}{IS_HET_ATM} == B_FALSE){
+            next if( ! defined $selected_chainIds{$ptr->{CHAIN_ID}} || ( ! $put_ligand_atoms && among_marked_residues($ptr,\%residue_select) ) );
+            writeAtomline($ptr);
+        }elsif(${$ptr}{IS_HET_ATM} == B_TRUE){
+            next if( ! defined $selected_chainIds{$ptr->{CHAIN_ID}} || ( ! $put_ligand_atoms && among_marked_residues($ptr,\%residue_select) ) );
+            writeHETAtomline($ptr);
+        }
+    }
+
+    if($put_ligand_atoms == B_TRUE){
+        foreach my $ligand (@reqdligands){
+            foreach my $ptr (@{$ligands{$ligand}}){
+                writeHETAtomline($ptr) if( $ptr->{IS_HET_ATM} );
+            }
+        }  
+    }
+  printf("%-6s\n","ENDMDL") if($is_nmr_model == B_TRUE);
+}else{
+  my $header = extractheader($pdbfile, $filename_only);
+  if(not defined $default_directory){
+    $default_directory = $ENV{'PWD'}."/".DEF_OUTPUT_DIRECTORY."_$header"; 
+    if( not -d $default_directory){
+      mkdir $default_directory or die "Error: Can not create output directory : $default_directory : $! \n";
+    }
+  }
+D0:foreach my $ligand (keys %neighbor_map){
+    my $str = $ligand;
+    $str =~ s/:/_/g;
+    my $mdlnum = $model_number[$model_count];
+    my $filename = ($is_nmr_model == B_FALSE)?"${default_directory}/${header}_${str}.pdb":"${default_directory}/model_${mdlnum}_${header}_${str}.pdb"; 
+    open FH, ">$filename" or die "Error: creating output file $filename : $! \n"; 
+    my $last_refcounter = undef;
+D1: foreach my $ptr (sort { ${$a}{REF_COUNTER} <=> ${$b}{REF_COUNTER}  } @{$neighbor_map{$ligand}}){
+      next D1 if(defined $last_refcounter and $last_refcounter == ${$ptr}{REF_COUNTER} );
+      $last_refcounter = ${$ptr}{REF_COUNTER};
+      if(${$ptr}{IS_HET_ATM} == B_FALSE){
+        next D1 if( ! defined $selected_chainIds{$ptr->{CHAIN_ID}} || ( ! $put_ligand_atoms && among_marked_residues($ptr,\%residue_select) ) );
+        writeAtomline($ptr,*FH);
+      }elsif(${$ptr}{IS_HET_ATM} == B_TRUE){
+        next D1 if( ! defined $selected_chainIds{$ptr->{CHAIN_ID}} || ( ! $put_ligand_atoms && among_marked_residues($ptr,\%residue_select) ) );
+        writeHETAtomline($ptr,*FH);
+      }
+    }
+    if($put_ligand_atoms == B_TRUE){
+      foreach my $ptr ( sort { ${$a}{REF_COUNTER} <=> ${$b}{REF_COUNTER} } @{$ligands{$ligand}} ){
+        writeHETAtomline($ptr,*FH) if( $ptr->{IS_HET_ATM} );
+      }
+    }
+    close FH;
+  }
+}
+
+$model_count++;
+goto LOOP_START_FOR_MODEL  if($model_count < scalar @model_number);
